@@ -1,30 +1,31 @@
-# import torch
-#
-# # 1. 检查 CUDA 是否可用
-# print("CUDA available:", torch.cuda.is_available())
-#
-# if torch.cuda.is_available():
-#     # 2. 查看 GPU 数量
-#     print("GPU count:", torch.cuda.device_count())
-#     # 3. 获取当前 GPU 名称
-#     print("Current GPU:", torch.cuda.get_device_name(torch.cuda.current_device()))
-#
-#     # 4. 创建一个张量并移动到 GPU
-#     x = torch.tensor([1.0, 2.0, 3.0]).cuda()
-#     print("Tensor on GPU:", x)
-#
-#     # 5. 执行简单运算
-#     y = x * 2
-#     print("Result on GPU:", y)
-#
-#     # 6. 将结果移回 CPU
-#     print("Result on CPU:", y.cpu())
-# else:
-#     print("CUDA not available. Please check your PyTorch installation.")
-#
-# print(torch.__version__)               # 应显示类似 2.5.0+cu124（或 cu121）
-# print(torch.cuda.is_available())        # 应为 True
-# print(torch.cuda.get_device_name(0))    # 应显示 GPU 名称 "NVIDIA GeForce RTX 5060"
+def one():
+    import torch
+
+    # 1. 检查 CUDA 是否可用
+    print("CUDA available:", torch.cuda.is_available())
+
+    if torch.cuda.is_available():
+        # 2. 查看 GPU 数量
+        print("GPU count:", torch.cuda.device_count())
+        # 3. 获取当前 GPU 名称
+        print("Current GPU:", torch.cuda.get_device_name(torch.cuda.current_device()))
+
+        # 4. 创建一个张量并移动到 GPU
+        x = torch.tensor([1.0, 2.0, 3.0]).cuda()
+        print("Tensor on GPU:", x)
+
+        # 5. 执行简单运算
+        y = x * 2
+        print("Result on GPU:", y)
+
+        # 6. 将结果移回 CPU
+        print("Result on CPU:", y.cpu())
+    else:
+        print("CUDA not available. Please check your PyTorch installation.")
+
+    print(torch.__version__)               # 应显示类似 2.5.0+cu124（或 cu121）
+    print(torch.cuda.is_available())        # 应为 True
+    print(torch.cuda.get_device_name(0))    # 应显示 GPU 名称 "NVIDIA GeForce RTX 5060"
 
 
 def dataset1():
@@ -1249,4 +1250,255 @@ def train__4():
         total_test_step+=1
         scheduler.step()
 
-train__4()
+def mlp_language():
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+    import string
+
+    #定义字典
+    char2indx={s:i for i,s in enumerate(string.ascii_lowercase)}
+    #26个字母对应0到25
+
+    example='love' #示例
+    idx=[]
+
+    for i in example:
+        idx.append(char2indx[i])  #按字典去分词
+
+    idx=torch.tensor(idx)   #将结果转换为tensor
+
+    #使用独热编码，将文本转换为二维张量
+    num_claz=len(char2indx)
+    dims=5  #定义希望得到的张量长度
+
+    x=F.one_hot(idx,num_classes=num_claz).float()  #torch中的独热模块
+    w=torch.randn(num_claz,dims) #生成指定形状的服从随机分布的随机张量
+    print((x@w).shape)
+
+    class Embedding:    #文本嵌入
+        def __init__(self,num_embeddings,embedding_dim):
+            self.weight=torch.randn((num_embeddings,embedding_dim),requires_grad=True) #设置随机张量（requires_grad表示需要梯度
+
+        def __call__(self,x):
+            self.out=self.weight[x]   #相当于先调用one_hot，再用结果和随机张量做矩阵乘法
+                                      # ->  x=F.one_hot(x,nums_classes=num_embedding).float()
+                                      #     w=torch.randn(num_embeddings,embedding_dim)
+                                      #     self.out=x@w
+            return self.out
+        def parameters(self):
+            return [self.weight]
+
+    em=Embedding(num_claz,dims)
+    x=torch.randint(0,num_claz,(10,))  #用全0测试
+    print(em(x).shape)
+
+    #文字(B,T) --分词器-->  (B,T) （张量，元素为数字） --文本嵌入-->  (B,T,C)
+    #B  文本个数
+    #T  文本长度
+    #C  特征个数
+
+def zzz():
+    import pandas as pd
+    df=pd.read_parquet('C:\\Users\\rhys1\\Desktop\\zane_project\\python\\pytorch\\python\\train-00000-of-00001.parquet')
+    print(df.head(1))
+
+def mlp_language_2():
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+    from torch.utils.data import DataLoader
+    import matplotlib.pyplot as plt
+    import torchvision
+    import torch.nn.functional as F
+
+    import os
+
+    os.environ["HF_DATASETS_OFFLINE"] = "1"
+
+    cache_root='C:\\Users\\rhys1\\Desktop\\zane_project\\python\\pytorch\\hf_cache'
+
+    os.environ["HF_HOME"] = cache_root
+    os.environ["HF_DATASETS_CACHE"] = cache_root + r'\datasets'  # 处理好的 Arrow 数据集
+    os.environ["HF_MODULES_CACHE"] = cache_root + r'\modules'  # 加载脚本(.py)
+    os.environ["HF_HUB_CACHE"] = cache_root + r'\hub'  # 原始下载文件
+
+    from datasets import load_dataset
+    raw_datasets = load_dataset("code_search_net", "python")
+    datasets = raw_datasets['train'].filter(lambda x: 'apache/spark' in x['repository_name'])
+
+    print(datasets[8]['whole_func_string'])
+
+    class CharTokenizer:    #分词器
+        def __init__(self,data,begin_ind=0,end_ind=1):
+            #data: list[str]
+            chars=sorted(list(set(''.join(data))))
+            self.char2ind={s:i+2 for i,s in enumerate(chars)}  #加2是预留的特殊字符
+                                                               #正向
+            self.char2ind['<|b|>']=begin_ind #表示字符串开头
+            self.char2ind['<|e|>']=end_ind   #表示字符串结尾
+            self.ind2char={v:k for k,v in self.char2ind.items()}  #反向
+            self.begin_ind=begin_ind
+            self.end_ind=end_ind
+
+        def encode(self,x):
+            # x:list[str]
+            return [self.char2ind[i] for i in x]
+
+        def decode(self,x):
+            # x:int or list[x]
+            if isinstance(x, int):
+                return self.ind2char[x]
+            return [self.ind2char[i] for i in x]
+
+    tokenizer=CharTokenizer(datasets['whole_func_string'])
+
+    test_str='def f(x):'
+    print(tokenizer.encode(test_str))
+    print(tokenizer.decode(tokenizer.encode(test_str)))
+
+    def autoregressive_trans(text,tokenizer,context_length=10):#输入数据，分词器，背景长度
+        #text:str
+        inputs,labels=[],[]
+        bind=tokenizer.begin_ind
+        eind=tokenizer.end_ind   #取出表示字符串开头和结尾的特殊字符串的序号
+        enc=tokenizer.encode(text)  #将字符串编码
+        #增加特殊字符
+        data=[bind]*context_length+enc+[eind]
+        for i in range(len(data)-context_length):
+            inputs.append(data[i:i+context_length])
+            labels.append(data[i+context_length])
+        return inputs,labels
+
+    inputs,labels=autoregressive_trans(test_str,tokenizer,context_length=3)
+    for a,b in zip(inputs,labels):
+        print(f'{''.join(tokenizer.decode(a)):<15} -->  {tokenizer.decode(b):<10}')
+
+    def process(data,tokenizer):
+        text=data['whole_func_string']  #取数据
+        if isinstance(text,str):
+            inputs,labels=autoregressive_trans(text,tokenizer)
+            return {'inputs':inputs,'labels':labels}
+        inputs,labels=[],[]
+        for t in text:
+            i,l=autoregressive_trans(t,tokenizer)
+            inputs+=i
+            labels+=l
+        return {'inputs':inputs,'labels':labels}
+
+    print(process(datasets[8],tokenizer))
+    print(process(datasets[8:9],tokenizer))
+
+    #将数据分为训练集和测试集
+    tokenized=datasets.train_test_split(test_size=0.1,seed=1024,shuffle=True)
+
+    device='cuda' if torch.cuda.is_available() else 'cpu'
+    batch_size=1000
+    learning_rate=0.01
+    eval_iters=10
+
+    f=lambda x: process(x,tokenizer)
+    tokenized=tokenized.map(f,batched=True,remove_columns=datasets.column_names)#batched：True传入列表，False传入一条一条的数据
+    tokenized.set_format(type='torch',device=device)
+
+    print(tokenized['train'])
+    print(tokenized['train']['labels'])
+    print(tokenized['train']['inputs'][:].shape)
+
+    train_loader=DataLoader(tokenized['train'],batch_size=batch_size,shuffle=True)
+    test_loader=DataLoader(tokenized['test'],batch_size=batch_size,shuffle=True)
+
+    print(next(iter(train_loader)))
+
+    class CharMLP(nn.Module):
+        def __init__(self,vs):  #vs：字典大小
+            super().__init__()
+            self.emb=nn.Embedding(vs,30)   #嵌入层,用30个特征表示文本
+            self.hidden1=nn.Linear(10*30,200)  #背景长度10
+            self.hidden2=nn.Linear(200,100)
+            self.lm=nn.Linear(100,vs)
+        def forward(self,x):
+            #x：(B,10)
+            B=x.shape[0]
+            emb=self.emb(x) #（B,10,30)
+            h=emb.view(B,-1) #(B,300)
+            h=F.relu(self.hidden1(h)) #(B,200)
+            h=F.relu(self.hidden2(h)) #(B,100)
+            out=self.lm(h)     #(B,vs)
+            return out
+
+    model=CharMLP(len(tokenizer.char2ind)).to(device)
+
+    print(model)
+
+    def estimate_loss(model):
+        re={}
+        model.eval()
+        re['train']=_loss(model,train_loader)
+        re['test']=_loss(model,test_loader)
+        model.train()
+        return re
+
+    @torch.no_grad()
+    def _loss(model,data_loader):
+        loss=[]
+        data_iter=iter(data_loader)
+        for k in range(eval_iters):
+            data=next(data_iter,None)
+            if data is None:
+                data_iter=iter(data_loader)
+                data=next(data_iter,None)
+            inputs,labels=data['inputs'],data['labels']
+            logits=model(inputs)
+            loss.append(F.cross_entropy(logits,labels).item())
+        return torch.tensor(loss).mean().item()
+
+    print(estimate_loss(model))
+
+    def train_model(model,optimizer,epochs=10):
+        lossi=[]
+        for epoch in range(epochs):
+            for i,data in enumerate(train_loader,0):
+                inputs,labels=data['inputs'],data['labels']
+                optimizer.zero_grad()
+                logits=model(inputs)
+                loss=F.cross_entropy(logits,labels)
+                lossi.append(loss.item())
+                loss.backward()
+                optimizer.step()
+            stats=estimate_loss(model)
+            train_loss=f'train loss {stats["train"]:.4f}'
+            test_loss=f'test loss {stats["test"]:.4f}'
+            print(f'epoch{epoch:>2} : {train_loss} , {test_loss}')
+        return lossi
+
+    @torch.no_grad()
+    def generate(model,context,tokenizer,max_new_token=300):
+        #context:(1,10)
+        out=[]
+        model.eval()
+        for i in range(max_new_token):
+            logits=model(context)          #(1,99)
+            probs=F.softmax(logits,dim=-1) #(1,99)
+            #随机生成文本
+            ix=torch.multinomial(probs,num_samples=1)   #(1,1)
+            #更新背景
+            context=torch.concat((context[:,1:],ix),dim=-1)
+            out.append(ix.item())
+            if out[-1]==tokenizer.end_ind:
+                break
+        model.train()
+        return out
+
+    context=torch.zeros((1,10),dtype=torch.long,device=device)#生成空背景
+    print(''.join(tokenizer.decode(generate(model,context,tokenizer))))#输出乱码：原始模型
+
+    l=train_model(model,optim.Adam(model.parameters(),lr=learning_rate))
+    context = torch.zeros((1, 10), dtype=torch.long, device=device)  # 生成空背景
+    print(''.join(tokenizer.decode(generate(model, context, tokenizer))))
+
+
+
+
+
+
