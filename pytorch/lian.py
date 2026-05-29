@@ -1,3 +1,4 @@
+
 def one():
     import torch
 
@@ -1308,8 +1309,6 @@ def mlp_language_2():
     import torch.nn as nn
     import torch.optim as optim
     from torch.utils.data import DataLoader
-    import matplotlib.pyplot as plt
-    import torchvision
     import torch.nn.functional as F
 
     import os
@@ -1497,8 +1496,261 @@ def mlp_language_2():
     context = torch.zeros((1, 10), dtype=torch.long, device=device)  # 生成空背景
     print(''.join(tokenizer.decode(generate(model, context, tokenizer))))
 
+def RNN_1():
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+    from torch.utils.data import DataLoader
+    import torch.nn.functional as F
+    import os
+
+    os.environ["HF_DATASETS_OFFLINE"] = "1"
+
+    cache_root='C:\\Users\\rhys1\\Desktop\\zane_project\\python\\pytorch\\hf_cache'
+
+    os.environ["HF_HOME"] = cache_root
+    os.environ["HF_DATASETS_CACHE"] = cache_root + r'\datasets'  # 处理好的 Arrow 数据集
+    os.environ["HF_MODULES_CACHE"] = cache_root + r'\modules'  # 加载脚本(.py)
+    os.environ["HF_HUB_CACHE"] = cache_root + r'\hub'  # 原始下载文件
+
+    from datasets import load_dataset
+    raw_datasets = load_dataset("code_search_net", "python")
+    datasets = raw_datasets['train'].filter(lambda x: 'apache/spark' in x['repository_name'])
+
+    print(datasets[8]['whole_func_string'])
+
+    # device='cuda' if torch.cuda.is_available() else 'cpu'
+    device='cpu'
+    learning_rate=0.001
+
+    class RNNCell(nn.Module):
+        def __init__(self,input_size,hidden_size):#输入张量的长度，隐藏层张量的长度
+            super().__init__()
+            self.input_size=input_size
+            self.hidden_size=hidden_size
+            self.i2h=nn.Linear(input_size+hidden_size,hidden_size)
+
+        def forward(self,input,hidden=None):
+            #input:(1,input_size) ,在NLP领域，I等于文本嵌入的C
+            #hidden:(1,hidden_size)
+            if hidden is None:
+                hidden=self.init_hidden(input.device)
+            combined=torch.concat((input,hidden),dim=-1) #拼接：(1,I+H)
+            hidden=F.relu(self.i2h(combined))    #(1,H)
+            return hidden
+
+        def init_hidden(self,device):
+            return torch.zeros((1,self.hidden_size),device=device)
+
+    r_model=RNNCell(2,3)
+    data=torch.randn(4,1,2)#4个文本，每个文本长度为1，文本特征为2
+    hidden=None
+    for i in range(data.shape[0]):
+        hidden=r_model(data[i],hidden)
+        print(hidden)
+
+    class CharRNN(nn.Module):
+        def __init__(self,vs):
+            super().__init__()
+            self.emb=nn.Embedding(vs,30)
+            self.rnn=RNNCell(30,50)
+            self.lm=nn.Linear(50,vs)
+
+        def forward(self,x,hidden=None):
+            #x:1
+            #hidden:(1,50)
+            embeddings=self.emb(x)   #(1,30)
+            hidden=self.rnn(embeddings,hidden) #(1,50)
+            out=self.lm(hidden)     #(1,vs)
+            return out,hidden
+
+    class CharTokenizer:    #分词器
+        def __init__(self,data,end_ind=0):
+            #data: list[str]
+            chars=sorted(list(set(''.join(data))))
+            self.char2ind={s:i+1 for i,s in enumerate(chars)}  #加2是预留的特殊字符
+                                                               #正向
+            self.char2ind['<|e|>']=end_ind   #表示字符串结尾
+            self.ind2char={v:k for k,v in self.char2ind.items()}  #反向
+            self.end_ind=end_ind
+
+        def encode(self,x):
+            # x:list[str]
+            return [self.char2ind[i] for i in x]
+
+        def decode(self,x):
+            # x:int or list[x]
+            if isinstance(x, int):
+                return self.ind2char[x]
+            return [self.ind2char[i] for i in x]
+
+    tokenizer=CharTokenizer(datasets['whole_func_string'])
+
+    test_str='def f(x):'
+    print(tokenizer.encode(test_str))
+    print(''.join(tokenizer.decode(range(len(tokenizer.char2ind)))))
+
+    c_model=CharRNN(len(tokenizer.char2ind)).to(device)
+    print(c_model)
+
+    inputs=torch.tensor(tokenizer.encode('d'),device=device)
+    out,hidden=c_model(inputs)
+    print(out.shape,hidden.shape)
+
+    @torch.no_grad()
+    def generate(model,idx,tokenizer,max_new_token=300):
+        #idx:(1)
+        out=idx.tolist()
+        hidden=None
+        model.eval()
+        for i in range(max_new_token):
+            logits,hidden=model(idx,hidden)
+            probs=F.softmax(logits,dim=-1)        #(1,98)
+            #随机生成文本
+            ix=torch.multinomial(probs,num_samples=1)   #(1,1)
+
+            out.append(ix.item())
+            idx=ix.squeeze(0)
+            if out[-1]==tokenizer.end_ind:
+                break
+        model.train()
+        return out
+
+    print(''.join(tokenizer.decode(generate(c_model,inputs,tokenizer))))
+
+    def process(text,tokenizer):
+        #text:str
+        enc=tokenizer.encode(text)
+        inputs=enc
+        labels=enc[1:]+[tokenizer.end_ind]
+        return torch.tensor(inputs,device=device),torch.tensor(labels,device=device)
+
+    # print(process(test_str,tokenizer))
+
+    lossi=[]
+    epochs=3
+    optimizer=optim.Adam(c_model.parameters(),lr=learning_rate)
+
+    j=0
+    for e in range(epochs):
+        for data in datasets:
+            inputs,labels=process(data['whole_func_string'],tokenizer)
+            hidden=None
+            _loss=0.0
+            lens=len(inputs)
+            for i in range(lens):
+                logits,hidden=c_model(inputs[i].unsqueeze(0),hidden)#inputs[i]取出的维度为0，扩充维度
+                _loss+=F.cross_entropy(logits,labels[i].unsqueeze(0))/lens
+            lossi.append(_loss.item())
+            optimizer.zero_grad()
+            _loss.backward()
+            optimizer.step()
+
+            j+=1
+            if j%100==0:
+                print(f'{j}--------------')
+
+    inputs=torch.tensor(tokenizer.encode('d'),device=device)
+    print(''.join(tokenizer.decode(generate(c_model, inputs, tokenizer))))
+
+    #距离越远，反向传播路径越长，梯度越容易消失：：短期记忆
+
+def deep_RNN():
+    #(B,T,C)  B:文本数，T:每条文本长度，C特征数
+    #T必须串行，B可以并行
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+    from torch.utils.data import DataLoader
+    import torch.nn.functional as F
+    import os
+
+    os.environ["HF_DATASETS_OFFLINE"] = "1"
+
+    cache_root = 'C:\\Users\\rhys1\\Desktop\\zane_project\\python\\pytorch\\hf_cache'
+
+    os.environ["HF_HOME"] = cache_root
+    os.environ["HF_DATASETS_CACHE"] = cache_root + r'\datasets'  # 处理好的 Arrow 数据集
+    os.environ["HF_MODULES_CACHE"] = cache_root + r'\modules'  # 加载脚本(.py)
+    os.environ["HF_HUB_CACHE"] = cache_root + r'\hub'  # 原始下载文件
+
+    from datasets import load_dataset
+    raw_datasets = load_dataset("code_search_net", "python")
+    datasets = raw_datasets['train'].filter(lambda x: 'apache/spark' in x['repository_name'])
+
+    print(datasets[8]['whole_func_string'])
+
+    device='cuda' if torch.cuda.is_available() else 'cpu'
+    # device = 'cpu'
+    learning_rate = 0.001
+    eval_iters=10
+    batch_size=1000
+    sequence_len=64
+
+    class CharTokenizer:    #分词器
+        def __init__(self,data,end_ind=0):
+            #data: list[str]
+            chars=sorted(list(set(''.join(data))))
+            self.char2ind={s:i+1 for i,s in enumerate(chars)}  #加2是预留的特殊字符
+                                                               #正向
+            self.char2ind['<|e|>']=end_ind   #表示字符串结尾
+            self.ind2char={v:k for k,v in self.char2ind.items()}  #反向
+            self.end_ind=end_ind
+
+        def encode(self,x):
+            # x:list[str]
+            return [self.char2ind[i] for i in x]
+
+        def decode(self,x):
+            # x:int or list[x]
+            if isinstance(x, int):
+                return self.ind2char[x]
+            return [self.ind2char[i] for i in x]
+
+    tokenizer=CharTokenizer(datasets['whole_func_string'])
+
+    test_str='def f(x):'
+    print(tokenizer.encode(test_str))
+    print(''.join(tokenizer.decode(range(len(tokenizer.char2ind)))))
+
+    class RNN(nn.Module):
+        def __init__(self,input_size,hidden_size):
+            super().__init__()
+            self.input_size=input_size
+            self.hidden_size=hidden_size
+            self.i2h=nn.Linear(input_size+hidden_size,hidden_size)
+
+        def forward(self,inputs,hidden=None):
+            #input:(B,T,C)
+            #hidden:(B,H)
+            #out:(B,T,H)
+            B,T,C=inputs.shape
+            re=[]
+            if hidden is None:
+                hidden=self.init_hidden(B,inputs.device)
+            for i in range(T):
+                combined=torch.concat((inputs[:,i,:],hidden),dim=-1)  #(B,input_size+hidden_size)
+                hidden=F.relu(self.i2h(combined))
+                re.append(hidden)
+            return torch.stack(re,dim=1)               #(B,T,H)
+
+        def init_hidden(self,B,device):
+            return torch.zeros((B,self.hidden_size),device=device)
+
+    def stack():  #展示torch.stack
+        a=torch.zeros(3,4)
+        b=a+1
+        c=torch.stack((a,b),dim=1)
+        print(c.shape,c[:,0,:],c[:,1,:])
+    def stack_2(): #测试网络
+        r=RNN(3,4)
+        x=torch.randn(5,2,3)
+        print(r(x).shape)
+
+    #不定长数据：数据填充，数据截断
+
+    #批归一化不适合循环神经网络---->采用层归一化：
+    #固定B和T遍历C来求均值和方差
 
 
-
-
-
+deep_RNN()
