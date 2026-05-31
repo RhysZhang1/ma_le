@@ -1752,5 +1752,330 @@ def deep_RNN():
     #批归一化不适合循环神经网络---->采用层归一化：
     #固定B和T遍历C来求均值和方差
 
+    class CharRNNBatch(nn.Module):
+        def __init__(self,vs):
+            super().__init__()
+            emb_size=256   #文本嵌入层大小
+            hidden_size=128
+            self.emb=nn.Embedding(vs,emb_size)
+            self.rnn1=RNN(emb_size,hidden_size)
+            self.ln1=nn.LayerNorm(hidden_size)  #层归一化
+            self.rnn2=RNN(hidden_size,hidden_size)
+            self.ln2=nn.LayerNorm(hidden_size)
 
-deep_RNN()
+            self.lm=nn.Linear(hidden_size,vs)  #语言建模头
+            self.dp=nn.Dropout(p=0.2)  #随机失活
+
+        def forward(self,x):
+            #x:(B,T)
+            #暂不实现初始隐藏状态的输入
+            B=x.shape[0]
+            embeddings=self.emb(x)  #(B,T,emb_size)
+            h=torch.tanh(self.ln1(self.rnn1(embeddings)))  #(B,T,hidden_size)
+            h=self.dp(h)
+            h=torch.tanh(self.ln2(self.rnn2(h)))
+            h=self.dp(h)
+            out=self.lm(h)  #(B,T,vs)
+            return out
+
+    c_model=CharRNNBatch(len(tokenizer.char2ind)).to(device)
+    print(c_model)
+
+    @torch.no_grad()
+    def generate(model,context,tokenizer,max_new_token=300):
+        #context:(1,T)
+        out=context.tolist()[0]
+        model.eval()
+        for i in range(max_new_token):
+            #可以考虑截断背景，使得文本生成更加贴近训练
+            # logits=model(context[:,-sequence_len:])
+            logits=model(context)          #(1,T,98)
+            probs=F.softmax(logits[:,-1,:],dim=-1) #(1,98)
+            #随机生成文本
+            ix=torch.multinomial(probs,num_samples=1)   #(1,1)
+            #更新背景
+            context=torch.concat((context,ix),dim=-1)
+            out.append(ix.item())
+            if out[-1]==tokenizer.end_ind:
+                break
+        model.train()
+        return out
+
+    context=torch.tensor(tokenizer.encode('d'),device=device).unsqueeze(0)
+    print(''.join(tokenizer.decode(generate(c_model,context,tokenizer))))#输出乱码：原始模型
+
+    def process(data,tokenizer,sequence_len=sequence_len):
+        text=data['whole_func_string']
+        #text:list[str]
+        inputs,labels=[],[]
+        for t in text:
+            enc=tokenizer.encode(t)
+            enc+=[tokenizer.end_ind]
+            # enc = [tokenizer.begin_ind] * (sequence_len - 1) + enc + [tokenizer.end_ind]
+            for i in range(len(enc)-sequence_len):  #没有办法处理太短的文本
+                inputs.append(enc[i:i+sequence_len])
+                labels.append(enc[i+1:i+1+sequence_len])
+        return {'inputs':inputs,'labels':labels}
+
+    tokenized=datasets.train_test_split(test_size=0.1,seed=1024,shuffle=True)
+    f=lambda x: process(x,tokenizer)
+    tokenized=tokenized.map(f,batched=True,remove_columns=datasets.column_names)
+    tokenized.set_format(type='torch',device=device)
+
+    train_loader=DataLoader(tokenized['train'],batch_size=batch_size,shuffle=True)
+    test_loader=DataLoader(tokenized['test'],batch_size=batch_size,shuffle=True)
+
+    def estimate_loss(model):
+        re={}
+        model.eval()
+        re['train']=_loss(model,train_loader)
+        re['test']=_loss(model,test_loader)
+        model.train()
+        return re
+
+    @torch.no_grad()
+    def _loss(model,data_loader):
+        loss=[]
+        data_iter=iter(data_loader)
+        for k in range(eval_iters):
+            data=next(data_iter,None)
+            if data is None:
+                data_iter=iter(data_loader)
+                data=next(data_iter,None)
+            inputs,labels=data['inputs'],data['labels']     #(B,T)
+            logits=model(inputs)                            #(B,T,vs)
+            loss.append(F.cross_entropy(logits.transpose(-2,-1),labels).item())
+        return torch.tensor(loss).mean().item()
+
+    print(estimate_loss(c_model))
+
+    def train_model(model,optimizer,epochs=10):
+        lossi=[]
+        for epoch in range(epochs):
+            for i,data in enumerate(train_loader,0):
+                inputs,labels=data['inputs'],data['labels']   #(B,T)
+                optimizer.zero_grad()
+                logits=model(inputs)                      #(B,T,vs)
+                loss=F.cross_entropy(logits.transpose(-2,-1),labels)
+                lossi.append(loss.item())
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)#梯度裁剪
+                optimizer.step()
+            stats=estimate_loss(model)
+            train_loss=f'train loss {stats["train"]:.4f}'
+            test_loss=f'test loss {stats["test"]:.4f}'
+            print(f'epoch{epoch:>2} : {train_loss} , {test_loss}')
+        return lossi
+
+    l=train_model(c_model,optim.Adam(c_model.parameters(),lr=learning_rate))
+    context=torch.tensor(tokenizer.encode('d'),device=device).unsqueeze(0)
+    print(''.join(tokenizer.decode(generate(c_model,context,tokenizer))))
+
+def deep_RNN_2():
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+    from torch.utils.data import DataLoader
+    import torch.nn.functional as F
+
+    with open('龙族Ⅰ-Ⅳ.txt', 'r', encoding='utf-8') as f:
+        text = f.read()
+
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    # device = 'cpu'
+    learning_rate = 0.003
+    eval_iters = 100
+    batch_size = 512
+    sequence_len = 256
+
+    class CharTokenizer:  # 分词器
+        def __init__(self, data, end_ind=0):
+            # data: list[str]
+            chars = set(''.join(data))
+            chars = sorted(list(chars))
+            self.char2ind = {s: i + 1 for i, s in enumerate(chars)}  # 加2是预留的特殊字符
+            # 正向
+            self.char2ind['<|e|>'] = end_ind  # 表示字符串结尾
+            self.ind2char = {v: k for k, v in self.char2ind.items()}  # 反向
+            self.end_ind = end_ind
+
+        def encode(self, x):
+            # x:list[str]
+            return [self.char2ind[i] for i in x]
+
+        def decode(self, x):
+            # x:int or list[x]
+            if isinstance(x, int):
+                return self.ind2char[x]
+            return [self.ind2char[i] for i in x]
+
+    tokenizer = CharTokenizer([text])
+
+    class RNN(nn.Module):
+        def __init__(self, input_size, hidden_size):
+            super().__init__()
+            self.input_size = input_size
+            self.hidden_size = hidden_size
+            self.i2h = nn.Linear(input_size + hidden_size, hidden_size)
+
+        def forward(self, inputs, hidden=None):
+            # input:(B,T,C)
+            # hidden:(B,H)
+            # out:(B,T,H)
+            B, T, C = inputs.shape
+            re = []
+            if hidden is None:
+                hidden = self.init_hidden(B, inputs.device)
+            for i in range(T):
+                combined = torch.concat((inputs[:, i, :], hidden), dim=-1)  # (B,input_size+hidden_size)
+                hidden = torch.tanh(self.i2h(combined))
+                re.append(hidden)
+            return torch.stack(re, dim=1)  # (B,T,H)
+
+        def init_hidden(self, B, device):
+            return torch.zeros((B, self.hidden_size), device=device)
+
+    class CharRNNBatch(nn.Module):
+        def __init__(self, vs):
+            super().__init__()
+            emb_size = 256  # 文本嵌入层大小
+            hidden_size = 128
+            self.emb = nn.Embedding(vs, emb_size)
+            self.rnn1 = RNN(emb_size, hidden_size)
+            self.ln1 = nn.LayerNorm(hidden_size)  # 层归一化
+            self.rnn2 = RNN(hidden_size, hidden_size)
+            self.ln2 = nn.LayerNorm(hidden_size)
+
+            self.lm = nn.Linear(hidden_size, vs)  # 语言建模头
+            self.dp = nn.Dropout(p=0.2)  # 随机失活
+            self.dp_emb = nn.Dropout(p=0.1)
+
+        def forward(self, x):
+            # x:(B,T)
+            # 暂不实现初始隐藏状态的输入
+            B = x.shape[0]
+            embeddings = self.emb(x)  # (B,T,emb_size)
+            embeddings = self.dp_emb(embeddings)
+            h = torch.tanh(self.ln1(self.rnn1(embeddings)))  # (B,T,hidden_size)
+            h = self.dp(h)
+            h = torch.tanh(self.ln2(self.rnn2(h)))
+            h = self.dp(h)
+            out = self.lm(h)  # (B,T,vs)
+            return out
+
+    c_model = CharRNNBatch(len(tokenizer.char2ind)).to(device)
+    print(c_model)
+
+    @torch.no_grad()
+    def generate(model, context, tokenizer, max_new_token=300):
+        # context:(1,T)
+        out = context.tolist()[0]
+        model.eval()
+        for i in range(max_new_token):
+            # 可以考虑截断背景，使得文本生成更加贴近训练
+            logits = model(context[:, -sequence_len:])
+            # logits=model(context)          #(1,T,98)
+
+            temperature = 0.8
+            logits = logits[:, -1, :] / temperature
+            # 可选 top-k
+            top_k = 50
+            if top_k > 0:
+                v, _ = torch.topk(logits, top_k)
+                logits[logits < v[:, -1:]] = -float('Inf')
+            probs = F.softmax(logits, dim=-1)
+
+            # 随机生成文本
+            ix = torch.multinomial(probs, num_samples=1)  # (1,1)
+            # 更新背景
+            context = torch.concat((context, ix), dim=-1)
+            out.append(ix.item())
+            if out[-1] == tokenizer.end_ind:
+                break
+        model.train()
+        return out
+
+    from torch.utils.data import Dataset
+
+    class TextDataset(Dataset):
+        def __init__(self, text, seq_len):
+            # 将整个文本编码成数字序列
+            data = tokenizer.encode(text)
+            self.seq_len = seq_len
+            self.data = data
+
+        def __len__(self):
+            # 总共可以切出多少个样本
+            return len(self.data) - self.seq_len
+
+        def __getitem__(self, idx):
+            # 取一段长度为 seq_len 的输入，标签是右移一位
+            x = self.data[idx: idx + self.seq_len]
+            y = self.data[idx + 1: idx + self.seq_len + 1]
+            return torch.tensor(x), torch.tensor(y)
+
+    dataset = TextDataset(text, sequence_len)
+    total = len(dataset)
+    test_size = total // 10
+    train_dataset = torch.utils.data.Subset(dataset, range(0, total - test_size))
+    test_dataset = torch.utils.data.Subset(dataset, range(total - test_size, total))
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+    def estimate_loss(model):
+        re = {}
+        model.eval()
+        re['train'] = _loss(model, train_loader)
+        re['test'] = _loss(model, test_loader)
+        model.train()
+        return re
+
+    @torch.no_grad()
+    def _loss(model, data_loader):
+        loss = []
+        data_iter = iter(data_loader)
+        for k in range(eval_iters):
+
+            try:
+                data = next(data_iter)
+            except StopIteration:
+                data_iter = iter(data_loader)
+                data = next(data_iter)
+
+            inputs, labels = data  # (B,T)
+            inputs, labels = inputs.to(device), labels.to(device)
+            logits = model(inputs)  # (B,T,vs)
+            loss.append(F.cross_entropy(logits.transpose(-2, -1), labels).item())
+        return torch.tensor(loss).mean().item()
+
+    print(estimate_loss(c_model))
+
+    def train_model(model, optimizer, epochs=10):
+        lossi = []
+        for epoch in range(epochs):
+            for i, data in enumerate(train_loader, 0):
+                inputs, labels = data  # (B,T)
+                inputs, labels = inputs.to(device), labels.to(device)
+                optimizer.zero_grad()
+                logits = model(inputs)  # (B,T,vs)
+                loss = F.cross_entropy(logits.transpose(-2, -1), labels)
+                lossi.append(loss.item())
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # 梯度裁剪
+                optimizer.step()
+            stats = estimate_loss(model)
+            train_loss = f'train loss {stats["train"]:.4f}'
+            test_loss = f'test loss {stats["test"]:.4f}'
+            print(f'epoch{epoch:>2} : {train_loss} , {test_loss}')
+        return lossi
+
+    l = train_model(c_model, optim.AdamW(c_model.parameters(), lr=learning_rate, weight_decay=1e-4), 30)
+    start_char = ' '
+    encoded = tokenizer.encode(start_char)
+    pad_len = sequence_len - len(encoded)
+    pad_id = tokenizer.encode(' ')[0]
+    context = torch.tensor([pad_id] * pad_len + encoded, device=device).unsqueeze(0)
+    print(''.join(tokenizer.decode(generate(c_model, context, tokenizer))))
+
+deep_RNN_2()
