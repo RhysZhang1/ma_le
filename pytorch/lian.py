@@ -1,3 +1,6 @@
+from sympy.crypto.crypto import char_morse
+from torch.nn.functional import embedding
+
 
 def one():
     import torch
@@ -1500,7 +1503,6 @@ def RNN_1():
     import torch
     import torch.nn as nn
     import torch.optim as optim
-    from torch.utils.data import DataLoader
     import torch.nn.functional as F
     import os
 
@@ -1691,7 +1693,7 @@ def deep_RNN():
         def __init__(self,data,end_ind=0):
             #data: list[str]
             chars=sorted(list(set(''.join(data))))
-            self.char2ind={s:i+1 for i,s in enumerate(chars)}  #加2是预留的特殊字符
+            self.char2ind={s:i+1 for i,s in enumerate(chars)}  #加1是预留的特殊字符
                                                                #正向
             self.char2ind['<|e|>']=end_ind   #表示字符串结尾
             self.ind2char={v:k for k,v in self.char2ind.items()}  #反向
@@ -1893,7 +1895,7 @@ def deep_RNN_2():
             # data: list[str]
             chars = set(''.join(data))
             chars = sorted(list(chars))
-            self.char2ind = {s: i + 1 for i, s in enumerate(chars)}  # 加2是预留的特殊字符
+            self.char2ind = {s: i + 1 for i, s in enumerate(chars)}  # 加1是预留的特殊字符
             # 正向
             self.char2ind['<|e|>'] = end_ind  # 表示字符串结尾
             self.ind2char = {v: k for k, v in self.char2ind.items()}  # 反向
@@ -2078,4 +2080,729 @@ def deep_RNN_2():
     context = torch.tensor([pad_id] * pad_len + encoded, device=device).unsqueeze(0)
     print(''.join(tokenizer.decode(generate(c_model, context, tokenizer))))
 
-deep_RNN_2()
+def LSTM_():
+    # 长短期记忆网络
+    # 隐藏状态--分-->细胞状态，隐藏状态
+    # 细胞状体：长期记忆，隐藏状态：短期记忆
+    # 门控组件：进行信息的筛选：遗忘门，输入门，输出门
+    # 备选细胞状态：更新细胞状态
+
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+    from torch.utils.data import DataLoader
+    import torch.nn.functional as F
+    import os
+
+    os.environ["HF_DATASETS_OFFLINE"] = "1"
+
+    cache_root = 'C:\\Users\\rhys1\\Desktop\\zane_project\\python\\pytorch\\hf_cache'
+
+    os.environ["HF_HOME"] = cache_root
+    os.environ["HF_DATASETS_CACHE"] = cache_root + r'\datasets'  # 处理好的 Arrow 数据集
+    os.environ["HF_MODULES_CACHE"] = cache_root + r'\modules'  # 加载脚本(.py)
+    os.environ["HF_HUB_CACHE"] = cache_root + r'\hub'  # 原始下载文件
+
+    from datasets import load_dataset
+
+    raw_datasets = load_dataset("code_search_net", "python")
+    datasets = raw_datasets['train'].filter(lambda x: 'apache/spark' in x['repository_name'])
+
+    print(datasets[8]['whole_func_string'])
+
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    # device = 'cpu'
+    learning_rate = 0.001
+    eval_iters = 10
+    batch_size = 1000
+    sequence_len = 64
+
+
+    class CharTokenizer:  # 分词器
+        def __init__(self, data, end_ind=0):
+            # data: list[str]
+            chars = sorted(list(set(''.join(data))))
+            self.char2ind = {s: i + 1 for i, s in enumerate(chars)}  # 加1是预留的特殊字符
+            # 正向
+            self.char2ind['<|e|>'] = end_ind  # 表示字符串结尾
+            self.ind2char = {v: k for k, v in self.char2ind.items()}  # 反向
+            self.end_ind = end_ind
+
+        def encode(self, x):
+            # x:list[str]
+            return [self.char2ind[i] for i in x]
+
+        def decode(self, x):
+            # x:int or list[x]
+            if isinstance(x, int):
+                return self.ind2char[x]
+            return [self.ind2char[i] for i in x]
+
+
+    tokenizer = CharTokenizer(datasets['whole_func_string'])
+
+    test_str = 'def f(x):'
+    print(tokenizer.encode(test_str))
+    print(''.join(tokenizer.decode(range(len(tokenizer.char2ind)))))
+
+
+    def process(data, tokenizer, sequence_len=sequence_len):
+        text = data['whole_func_string']
+        # text:list[str]
+        inputs, labels = [], []
+        for t in text:
+            enc = tokenizer.encode(t)
+            enc += [tokenizer.end_ind]
+            # enc = [tokenizer.begin_ind] * (sequence_len - 1) + enc + [tokenizer.end_ind]
+            for i in range(len(enc) - sequence_len):  # 没有办法处理太短的文本
+                inputs.append(enc[i:i + sequence_len])
+                labels.append(enc[i + 1:i + 1 + sequence_len])
+        return {'inputs': inputs, 'labels': labels}
+
+
+    tokenized = datasets.train_test_split(test_size=0.1, seed=1024, shuffle=True)
+    f = lambda x: process(x, tokenizer)
+    tokenized = tokenized.map(f, batched=True, remove_columns=datasets.column_names)
+    tokenized.set_format(type='torch', device=device)
+
+    train_loader = DataLoader(tokenized['train'], batch_size=batch_size, shuffle=True)
+    test_loader = DataLoader(tokenized['test'], batch_size=batch_size, shuffle=True)
+
+
+    @torch.no_grad()
+    def generate(model, context, tokenizer, max_new_token=300):
+        # context:(1,T)
+        out = context.tolist()[0]
+        model.eval()
+        for i in range(max_new_token):
+            # 可以考虑截断背景，使得文本生成更加贴近训练
+            # logits=model(context[:,-sequence_len:])
+            logits = model(context)  # (1,T,98)
+            probs = F.softmax(logits[:, -1, :], dim=-1)  # (1,98)
+            # 随机生成文本
+            ix = torch.multinomial(probs, num_samples=1)  # (1,1)
+            # 更新背景
+            context = torch.concat((context, ix), dim=-1)
+            out.append(ix.item())
+            if out[-1] == tokenizer.end_ind:
+                break
+        model.train()
+        return out
+
+
+    def estimate_loss(model):
+        re={}
+        model.eval()
+        re['train']=_loss(model,train_loader)
+        re['test']=_loss(model,test_loader)
+        model.train()
+        return re
+
+    @torch.no_grad()
+    def _loss(model,data_loader):
+        loss=[]
+        data_iter=iter(data_loader)
+        for k in range(eval_iters):
+            data=next(data_iter,None)
+            if data is None:
+                data_iter=iter(data_loader)
+                data=next(data_iter,None)
+            inputs,labels=data['inputs'],data['labels']     #(B,T)
+            logits=model(inputs)                            #(B,T,vs)
+            loss.append(F.cross_entropy(logits.transpose(-2,-1),labels).item())
+        return torch.tensor(loss).mean().item()
+
+    def train_model(model,optimizer,epochs=10):
+        lossi=[]
+        for epoch in range(epochs):
+            for i,data in enumerate(train_loader,0):
+                inputs,labels=data['inputs'],data['labels']   #(B,T)
+                optimizer.zero_grad()
+                logits=model(inputs)                      #(B,T,vs)
+                loss=F.cross_entropy(logits.transpose(-2,-1),labels)
+                lossi.append(loss.item())
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)#梯度裁剪
+                optimizer.step()
+            stats=estimate_loss(model)
+            train_loss=f'train loss {stats["train"]:.4f}'
+            test_loss=f'test loss {stats["test"]:.4f}'
+            print(f'epoch{epoch:>2} : {train_loss} , {test_loss}')
+        return lossi
+
+    def one():
+        class LSTMCell(nn.Module):
+            def __init__(self, input_size, hidden_size):#假设输出C和隐藏H的大小一样
+                super().__init__()
+                self.input_size = input_size
+                self.hidden_size = hidden_size
+                combine_size=hidden_size+input_size
+                self.forget_gate=nn.Linear(combine_size,hidden_size) #遗忘门
+                self.in_gate=nn.Linear(combine_size,hidden_size)  #输入门
+                self.out_gate=nn.Linear(combine_size,hidden_size) #输出门
+                self.new_cell_gate=nn.Linear(combine_size,hidden_size)  #更新细胞状态
+
+            def forward(self,input,state=None):
+                #input:(B,I)
+                #state:((B,H),(B,H))
+                B=input.shape[0]
+                if state is None:   #初始化
+                    state=self.init_state(B,input.device)
+                hs,cs=state
+                combine=torch.concat((input,hs),dim=-1)  #张量拼接   (B,I+H)
+                #细胞状态更新
+                ingate=F.sigmoid(self.in_gate(combine))
+                forgetgate=F.sigmoid(self.forget_gate(combine))
+                ncs=F.tanh(self.new_cell_gate(combine))
+                cs=(cs*forgetgate)+(ingate*ncs)
+                #隐藏状态更新
+                outgate=F.sigmoid(self.out_gate(combine))
+                hs=F.tanh(cs)*outgate
+                return hs,cs
+
+            def init_state(self,B,device):
+                hs=torch.zeros((B,self.hidden_size),device=device)
+                cs=torch.zeros((B,self.hidden_size),device=device)
+                return hs,cs
+
+        l_cell=LSTMCell(3,4)
+        x=torch.randn(5,3)
+        a,b=l_cell(x)
+        print(a.shape,b.shape)
+
+        class LSTM(nn.Module):
+            def __init__(self,input_size,hidden_size):
+                super().__init__()
+                self.cell=LSTMCell(input_size,hidden_size)
+
+            def forward(self,inputs,state=None):
+                #input:(B,T,C)
+                #state:((B,H),(B,H))
+                #out:(B,T,H)
+                B,T,C=inputs.shape
+                re=[]
+                for i in range(T):
+                    state=self.cell(inputs[:,i,:],state)
+                    re.append(state[0])
+                return torch.stack(re,dim=1)               #(B,T,H)
+
+        class CharLSTM(nn.Module):
+            def __init__(self,vs):
+                super().__init__()
+                self.emb_size=256 #文本嵌入长度
+                self.hidden_size=128
+                self.emb=nn.Embedding(vs,self.emb_size)
+                self.dp=nn.Dropout(p=0.4)
+                self.lstm1=LSTM(self.emb_size,self.hidden_size)
+                self.ln1=nn.LayerNorm(self.hidden_size)
+                self.lstm2=LSTM(self.hidden_size,self.hidden_size)
+                self.ln2=nn.LayerNorm(self.hidden_size)
+                self.lstm3=LSTM(self.hidden_size,self.hidden_size)
+                self.ln3=nn.LayerNorm(self.hidden_size)
+                self.lm=nn.Linear(self.hidden_size,vs)
+
+            def forward(self,x):
+                # x:(B,T)
+                embeddings=self.emb(x)  #(B,T,C)
+                h=self.ln1(self.dp(self.lstm1(embeddings)))  #(B,T,H)
+                h=self.ln2(self.dp(self.lstm2(h)))           #(B,T,H)
+                h=self.ln3(self.dp(self.lstm3(h)))           #(B,T,H)
+                output=self.lm(h)
+                return output
+
+        c_model=CharLSTM(len(tokenizer.char2ind)).to(device)
+        print(c_model)
+        return c_model
+
+    def two():
+        class LSTMLayerNorm(nn.Module):
+            def __init__(self,input_size,hidden_size):
+                super().__init__()
+                self.input_size=input_size
+                self.hidden_size=hidden_size
+                combined_size=self.input_size+self.hidden_size
+                self.gates=nn.Linear(combined_size,4*self.hidden_size,bias=False)
+                self.ln_gates=nn.LayerNorm(4*self.hidden_size)   #用于门的归一化
+                self.ln_c=nn.LayerNorm(self.hidden_size)  #用于细胞状态的归一化
+
+            def forward(self,inputs,state=None):
+                B,_=inputs.shape
+                if state is None:
+                    state=self.init_state(B,inputs.device)
+                hs,cs=state
+                combined=torch.cat((inputs,hs),dim=-1)   #(B,I+H)
+                i,f,c,o=self.ln_gates(self.gates(combined)).chunk(4,1)
+                ingate=F.sigmoid(i) #(B,H)
+                forgetgate=F.sigmoid(f) #(B,H)
+                outgate=F.sigmoid(o) #(B,H)
+                ncs=F.tanh(c) #(B,H)
+                cs=self.ln_c((forgetgate*cs)+(ingate*ncs)) #(B,H)
+                hs=outgate * F.tanh(cs)   #(B,H)
+                return hs,cs
+
+            def init_state(self,B,device):
+                cs=torch.zeros((B,self.hidden_size),device=device)
+                hs=torch.zeros((B,self.hidden_size),device=device)
+                return hs,cs
+
+        class LSTM(nn.Module):
+            def __init__(self, input_size, hidden_size):
+                super().__init__()
+                self.cell = LSTMLayerNorm(input_size, hidden_size)
+
+            def forward(self, inputs, state=None):
+                # inputs: (B, T, C)  →  returns: (B, T, H)
+                B, T, C = inputs.shape
+                re = []
+                for i in range(T):
+                    state = self.cell(inputs[:, i, :], state)
+                    re.append(state[0])
+                return torch.stack(re, dim=1)
+
+        class CharLSTMLayerNorm(nn.Module):
+            def __init__(self,vs):
+                super().__init__()
+                self.emb_size=256
+                self.hidden_size=128
+                self.embedding=nn.Embedding(vs,self.emb_size)
+                self.dp=nn.Dropout(p=0.4)
+                self.lstm1=LSTM(self.emb_size,self.hidden_size)
+                self.lstm2=LSTM(self.hidden_size,self.hidden_size)
+                self.lstm3=LSTM(self.hidden_size,self.hidden_size)
+                self.h2o=nn.Linear(self.hidden_size,vs)
+
+            def forward(self,x):
+                emb=self.embedding(x) #(B,T,C)
+                h=self.dp(self.lstm1(emb)) #(B,T,C)
+                h=self.dp(self.lstm2(h)) #(B,T,C)
+                h=self.dp(self.lstm3(h)) #(B,T,C)
+                output=self.h2o(h)#(B,T,vs)
+                return output
+
+        c_model=CharLSTMLayerNorm(len(tokenizer.char2ind)).to(device)
+        print(c_model)
+        return c_model
+
+    c_model=two()
+
+    context=torch.tensor(tokenizer.encode('def'),device=device).unsqueeze(0)
+    print(''.join(tokenizer.decode(generate(c_model,context,tokenizer))))#输出乱码：原始模型
+
+    print(estimate_loss(c_model))
+
+    l=train_model(c_model,optim.Adam(c_model.parameters(),lr=learning_rate))
+    context = torch.tensor(tokenizer.encode('def'), device=device).unsqueeze(0)
+    print(''.join(tokenizer.decode(generate(c_model, context, tokenizer))))
+
+
+def LSTM_AI_train():
+    """
+    策略：
+    1. 文本预编码后 → 一个巨 tensor，一次 .to(device)，永不回 CPU
+    2. 训练时 CPU 只做 torch.randint + GPU index_select（极轻量）
+    3. 不用 Dataset / DataLoader —— 消除 Python 迭代器开销
+    4. 大 batch + 大 hidden_size 填满 Tensor Core
+    5. 4 层 LSTM + 残差 + LayerNorm + GeLU + Dropout
+    6. cuDNN benchmark / TF32 / AMP / fused AdamW 全开
+    7. 余弦退火 + 梯度裁剪 + 最佳模型保存
+    """
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+    import torch.nn.functional as F
+    import os, time
+
+    # ======================== 0. 全局 GPU 优化开关 ========================
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.set_float32_matmul_precision('high')
+        DEVICE = torch.device('cuda:0')
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_mem = torch.cuda.get_device_properties(0).total_memory // (1024 ** 3)
+        print(f'GPU: {gpu_name} ({gpu_mem} GB VRAM)  |  '
+              f'CUDNN benchmark={torch.backends.cudnn.benchmark}')
+    else:
+        DEVICE = torch.device('cpu')
+
+    # ======================== 1. 读取 & 编码到 GPU ========================
+    with open('龙族Ⅰ-Ⅳ.txt', 'r', encoding='utf-8') as f:
+        text = f.read()
+    chars = sorted(list(set(text)))
+    c2i = {c: i + 1 for i, c in enumerate(chars)}
+    c2i['<|e|>'] = 0
+    i2c = {v: k for k, v in c2i.items()}
+    vocab_size = len(c2i)
+    print(f'文本长度: {len(text):,}  词汇表: {vocab_size}')
+
+    # ★ 关键优化：全量编码 → GPU，永不下车
+    t0 = time.perf_counter()
+    encoded = torch.tensor([c2i[c] for c in text], dtype=torch.long, device=DEVICE)
+    print(f'编码 + 上传 GPU: {time.perf_counter() - t0:.2f}s  '
+          f'({encoded.element_size() * encoded.numel() / 1024**2:.1f} MB)')
+
+    # ======================== 2. 超参 ========================
+    SEQ_LEN = 256
+    BATCH_SIZE = 256                # 大 batch 喂满 GPU
+    EMB_SIZE = 384
+    HIDDEN_SIZE = 768               # 大 hidden 占满 Tensor Core
+    NUM_LAYERS = 4
+    DROPOUT = 0.15
+    LEARNING_RATE = 3e-3
+    EPOCHS = 20
+    EVAL_ITERS = 50
+    GRAD_CLIP = 1.0
+
+    # ======================== 3. 模型 ========================
+    class DeepLSTM(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.emb = nn.Embedding(vocab_size, EMB_SIZE)
+            self.emb_drop = nn.Dropout(0.1)
+            self.proj_in = nn.Linear(EMB_SIZE, HIDDEN_SIZE)
+
+            # 4 层 LSTM
+            self.lstm = nn.LSTM(
+                input_size=HIDDEN_SIZE,
+                hidden_size=HIDDEN_SIZE,
+                num_layers=NUM_LAYERS,
+                dropout=DROPOUT if NUM_LAYERS > 1 else 0,
+                batch_first=True,
+            )
+
+            self.ln = nn.LayerNorm(HIDDEN_SIZE)
+            self.drop = nn.Dropout(DROPOUT)
+
+            # 2 层 MLP lm_head（比单 Linear 更强）
+            self.fc1 = nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE * 2)
+            self.fc2 = nn.Linear(HIDDEN_SIZE * 2, HIDDEN_SIZE)
+            self.lm_head = nn.Linear(HIDDEN_SIZE, vocab_size)
+            self.act = nn.GELU()
+
+            self.apply(self._init_weights)
+
+        def _init_weights(self, m):
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight, gain=0.8)
+                if m.bias is not None: nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Embedding):
+                nn.init.normal_(m.weight, mean=0.0, std=0.02)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.ones_(m.weight); nn.init.zeros_(m.bias)
+
+        def forward(self, x):
+            # x: (B, T) 已在 GPU
+            emb = self.emb_drop(self.emb(x))               # (B, T, EMB)
+            h = self.proj_in(emb)                          # (B, T, H)
+
+            lstm_out, _ = self.lstm(h)                     # (B, T, H)
+            h = self.drop(self.ln(lstm_out + h))            # 残差 + LN + Drop
+
+            # 2 层 MLP + 残差 lm_head
+            skip = h
+            h = self.act(self.fc1(h))
+            h = self.drop(h)
+            h = self.act(self.fc2(h))
+            h = self.drop(h)
+            h = h + skip                                   # (B, T, H)
+
+            return self.lm_head(h)                         # (B, T, V)
+
+    model = DeepLSTM().to(DEVICE)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f'参数量: {total_params/1e6:.1f}M  '
+          f'模型 ~{total_params*4/1024**2:.0f} MB (fp32)')
+
+    # ======================== 4. GPU 端 batch 构造 ========================
+    def get_batch(batch_size=BATCH_SIZE, seq_len=SEQ_LEN):
+        """
+        从 GPU 常驻 encoded 中直接 index_select 组装 batch。
+        CPU 只生成随机起始索引（微秒级），其余全在 GPU 内部完成。
+        """
+        n = len(encoded)
+        start_idx = torch.randint(0, n - seq_len - 1, (batch_size,), device=DEVICE)
+        idx = (start_idx.unsqueeze(1)
+               + torch.arange(seq_len, device=DEVICE).unsqueeze(0))
+        x = encoded[idx]                              # (B, T) — 纯 GPU 索引
+        y = encoded[idx + 1]                          # (B, T) — 右移一位
+        return x, y
+
+    # ======================== 5. 损失估算 ========================
+    @torch.no_grad()
+    def estimate_loss():
+        model.eval()
+        losses = []
+        for _ in range(EVAL_ITERS):
+            x, y = get_batch()
+            with torch.amp.autocast('cuda'):
+                logits = model(x)
+                loss = F.cross_entropy(
+                    logits.reshape(-1, vocab_size), y.reshape(-1))
+            losses.append(loss.item())
+        model.train()
+        return torch.tensor(losses).mean().item()
+
+    print(f'初始 loss: {estimate_loss():.4f}')
+
+    # ======================== 6. 训练 ========================
+    scaler = torch.amp.GradScaler('cuda')
+
+    # fused AdamW: 比普通 AdamW 更快更省显存
+    optimizer = optim.AdamW(
+        model.parameters(), lr=LEARNING_RATE,
+        weight_decay=0.1, betas=(0.9, 0.95),
+        fused=True,
+    )
+
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=EPOCHS, eta_min=LEARNING_RATE * 0.01)
+
+    total_tokens = len(encoded) - SEQ_LEN - 1
+    steps_per_epoch = total_tokens // (BATCH_SIZE * SEQ_LEN)
+    print(f'Steps/epoch ≈ {steps_per_epoch:,}  ({total_tokens:,} tokens)')
+
+    best_loss = float('inf')
+    best_path = 'best_model_lstm_2.pth'
+    t_all = time.perf_counter()
+
+    for epoch in range(EPOCHS):
+        model.train()
+        epoch_loss = 0.0
+        t_ep = time.perf_counter()
+
+        for step in range(steps_per_epoch):
+            x, y = get_batch()                           # GPU 直接取
+
+            with torch.amp.autocast('cuda'):
+                logits = model(x)
+                loss = F.cross_entropy(
+                    logits.reshape(-1, vocab_size), y.reshape(-1))
+
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+
+            epoch_loss += loss.item()
+
+        avg_train = epoch_loss / steps_per_epoch
+        test_loss = estimate_loss()
+        lr_now = scheduler.get_last_lr()[0]
+
+        print(f'[epoch {epoch+1:>3}/{EPOCHS}]  '
+              f'train={avg_train:.4f}  test={test_loss:.4f}  '
+              f'lr={lr_now:.6f}  '
+              f'{time.perf_counter()-t_ep:.1f}s'
+              f'{"最佳!" if test_loss < best_loss else ""}')
+
+        if test_loss < best_loss:
+            best_loss = test_loss
+            torch.save({
+                'epoch': epoch, 'model': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'test_loss': best_loss, 'vocab_size': vocab_size,
+                'c2i': c2i, 'i2c': i2c,
+            }, best_path)
+
+        scheduler.step()
+
+    print(f'\n总耗时: {time.perf_counter()-t_all:.0f}s  '
+          f'最佳 test_loss: {best_loss:.4f}')
+
+    # ======================== 7. 推理 ========================
+    if os.path.exists(best_path):
+        ckpt = torch.load(best_path, map_location=DEVICE)
+        model.load_state_dict(ckpt['model'])
+
+    @torch.no_grad()
+    def generate(start_str=' ', max_new=800,
+                 temperature=0.85, top_k=80, top_p=0.92):
+        encoded_start = [c2i.get(c, 0) for c in start_str]
+        pad_len = SEQ_LEN - len(encoded_start)
+        pad_id = c2i.get(' ', 0)
+        ctx = torch.tensor(
+            [pad_id] * pad_len + encoded_start, device=DEVICE).unsqueeze(0)
+
+        model.eval()
+        out = encoded_start.copy()
+        for _ in range(max_new):
+            logits = model(ctx)[:, -1, :] / temperature
+
+            # top-k
+            if top_k > 0:
+                v, __ = torch.topk(logits, min(top_k, vocab_size))
+                logits[logits < v[:, -1:]] = float('-inf')
+            # top-p
+            if top_p < 1.0:
+                s, si = torch.sort(logits, descending=True)
+                c = torch.cumsum(F.softmax(s, -1), -1)
+                mask = c > top_p
+                mask[:, 1:] = mask[:, :-1].clone(); mask[:, 0] = False
+                logits[mask.scatter(1, si, mask)] = float('-inf')
+
+            probs = F.softmax(logits, -1)
+            nxt = torch.multinomial(probs, 1)
+            ctx = torch.cat((ctx[:, 1:], nxt), dim=-1)
+            tok = nxt.item()
+            out.append(tok)
+            if tok == 0:  # <|e|>
+                break
+
+        return ''.join(i2c[t] for t in out)
+
+    print('\n' + '═' * 60)
+    print('生成结果:')
+    print('═' * 60)
+    print(generate('夜色'))
+
+
+
+def LSTM_test():
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+    import random
+    import numpy as np
+
+    # ======================== 配置 ========================
+    MODEL_PATH = 'best_model_lstm.pth'  # 模型文件路径
+    START_TEXT = '龙族'  # 起始文本
+    MAX_NEW_TOKENS = 2000  # 最大生成长度
+    TEMPERATURE = 0.85  # 温度（越高越随机）
+    TOP_K = 80  # top-k 采样
+    TOP_P = 0.92  # top-p 采样
+    SEED = 'aaa'  # 随机种子（None=不固定，每次不同）
+    # ======================================================
+
+    DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f'设备: {DEVICE}')
+
+    # ---------------------- 种子预处理：字符串→整数（确定性转换）----------------------
+    def _seed_to_int(s):
+        """将字符串确定性转为整数：相同字符串永远得到相同整数。
+        算法：多项式滚动哈希 (base=31, mod=2**32)，累积每个字符的 Unicode 码点。"""
+        if isinstance(s, int):
+            return s
+        h = 0
+        for ch in s:
+            h = (h * 31 + ord(ch)) & 0xFFFF_FFFF  # 32-bit 无符号
+        # 映射到 int32 范围（PyTorch seed 接受的有符号范围）
+        return h if h < 2**31 else h - 2**32
+
+    # ---------------------- 固定随机种子（可复现）----------------------
+    if SEED is not None:
+        seed_val = _seed_to_int(SEED)
+        random.seed(seed_val)
+        np.random.seed(seed_val)
+        torch.manual_seed(seed_val)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(seed_val)
+            torch.cuda.manual_seed_all(seed_val)
+        # 确保 GPU 上也是确定性（会略微降低性能，但保证结果可复现）
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        print(f'随机种子: {SEED}')
+    else:
+        print('随机种子: 未设置（每次结果不同）')
+
+    # ---------------------- 加载 checkpoint ----------------------
+    ckpt = torch.load(MODEL_PATH, map_location=DEVICE)
+    vocab_size = ckpt['vocab_size']
+    c2i = ckpt['c2i']
+    i2c = ckpt['i2c']
+
+    SEQ_LEN = 256
+    EMB_SIZE = 384
+    HIDDEN_SIZE = 768
+    NUM_LAYERS = 4
+    DROPOUT = 0.15
+
+    print(f'词汇表: {vocab_size}  最佳 test_loss: {ckpt.get("test_loss", "?"):.4f}')
+
+    # ---------------------- 模型定义（与训练时一致）-----------------------
+    class DeepLSTM(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.emb = nn.Embedding(vocab_size, EMB_SIZE)
+            self.emb_drop = nn.Dropout(0.1)
+            self.proj_in = nn.Linear(EMB_SIZE, HIDDEN_SIZE)
+
+            self.lstm = nn.LSTM(
+                input_size=HIDDEN_SIZE,
+                hidden_size=HIDDEN_SIZE,
+                num_layers=NUM_LAYERS,
+                dropout=DROPOUT if NUM_LAYERS > 1 else 0,
+                batch_first=True,
+            )
+
+            self.ln = nn.LayerNorm(HIDDEN_SIZE)
+            self.drop = nn.Dropout(DROPOUT)
+            self.fc1 = nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE * 2)
+            self.fc2 = nn.Linear(HIDDEN_SIZE * 2, HIDDEN_SIZE)
+            self.lm_head = nn.Linear(HIDDEN_SIZE, vocab_size)
+            self.act = nn.GELU()
+
+        def forward(self, x):
+            emb = self.emb_drop(self.emb(x))
+            h = self.proj_in(emb)
+            lstm_out, _ = self.lstm(h)
+            h = self.drop(self.ln(lstm_out + h))
+            skip = h
+            h = self.act(self.fc1(h))
+            h = self.drop(h)
+            h = self.act(self.fc2(h))
+            h = self.drop(h)
+            h = h + skip
+            return self.lm_head(h)
+
+    model = DeepLSTM().to(DEVICE)
+    model.load_state_dict(ckpt['model'])
+    model.eval()
+
+    total = sum(p.numel() for p in model.parameters())
+    print(f'参数量: {total / 1e6:.1f}M  模型已加载\n')
+
+    # ---------------------- 生成 ----------------------
+    @torch.no_grad()
+    def generate(start_str, max_new=800, temperature=0.85, top_k=80, top_p=0.92):
+        encoded_start = [c2i.get(c, 0) for c in start_str]
+        pad_len = SEQ_LEN - len(encoded_start)
+        pad_id = c2i.get(' ', 0)
+        ctx = torch.tensor(
+            [pad_id] * pad_len + encoded_start, device=DEVICE).unsqueeze(0)
+
+        out = encoded_start.copy()
+        for _ in range(max_new):
+            logits = model(ctx)[:, -1, :] / temperature
+
+            if top_k > 0:
+                v, __ = torch.topk(logits, min(top_k, vocab_size))
+                logits[logits < v[:, -1:]] = float('-inf')
+            if top_p < 1.0:
+                s, si = torch.sort(logits, descending=True)
+                c = torch.cumsum(F.softmax(s, -1), -1)
+                mask = c > top_p
+                mask[:, 1:] = mask[:, :-1].clone()
+                mask[:, 0] = False
+                logits[mask.scatter(1, si, mask)] = float('-inf')
+
+            probs = F.softmax(logits, -1)
+            nxt = torch.multinomial(probs, 1)
+            ctx = torch.cat((ctx[:, 1:], nxt), dim=-1)
+            tok = nxt.item()
+            out.append(tok)
+            if tok == 0:
+                break
+
+        return ''.join(i2c[t] for t in out)
+
+    if __name__ == '__main__':
+        print('═' * 60)
+        result = generate(START_TEXT, MAX_NEW_TOKENS, TEMPERATURE, TOP_K, TOP_P)
+        print(result)
+        print('═' * 60)
+        print(f'共 {len(result)} 字符')
+
